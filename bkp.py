@@ -19,10 +19,20 @@ def get_env(name, default=None, required=False):
 	return value
 
 
+def get_env_str(name, default="", required=False):
+	value = get_env(name, default=default, required=required)
+	if value is None:
+		return ""
+	return str(value)
+
+
 def resolve_db_path():
 	try:
-		from db.db_config import DB_PATH as CONFIG_DB_PATH
-		return str(CONFIG_DB_PATH)
+		from importlib import import_module
+		db_config = import_module("db.db_config")
+		config_db_path = getattr(db_config, "DB_PATH", None)
+		if config_db_path:
+			return str(config_db_path)
 	except Exception:
 		return get_env("DB_PATH", default=get_env("DATABASE_PATH"), required=True)
 
@@ -41,7 +51,7 @@ def build_backup(db_path, tz_name, temp_dir):
 		src_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 		with sqlite3.connect(backup_path, timeout=30) as dst_conn:
 			src_conn.backup(dst_conn)
-			if get_env("BACKUP_VACUUM", default="true").lower() == "true":
+			if get_env_str("BACKUP_VACUUM", default="true").lower() == "true":
 				dst_conn.execute("VACUUM")
 
 	# Cleanup any WAL/SHM that might be created for the temp backup
@@ -122,7 +132,7 @@ def send_email(zip_path, zip_name, subject, body, smtp_settings):
 def main():
 	try:
 		db_path = resolve_db_path()
-		tz_name = get_env("TIMEZONE", default="America/Sao_Paulo")
+		tz_name = get_env_str("TIMEZONE", default="America/Sao_Paulo")
 
 		# Reuse the same env vars as the app's email_service.py
 		smtp_user = get_env("EMAIL_REMETENTE", default=get_env("SMTP_USER", default=""))
@@ -136,8 +146,8 @@ def main():
 		if not to_addr:
 			raise ValueError("Missing recipient email. Set SMTP_TO or EMAIL_ADMIN.")
 
-		use_ssl = get_env("SMTP_USE_SSL", default="true").lower() == "true"
-		use_tls = get_env("SMTP_USE_TLS", default="false").lower() == "true"
+		use_ssl = get_env_str("SMTP_USE_SSL", default="true").lower() == "true"
+		use_tls = get_env_str("SMTP_USE_TLS", default="false").lower() == "true"
 		if use_ssl and use_tls:
 			raise ValueError("SMTP_USE_SSL and SMTP_USE_TLS cannot both be true.")
 
@@ -152,7 +162,7 @@ def main():
 			final_name = backup_zip_name
 
 			encryption_key = get_env("BACKUP_ENCRYPTION_KEY", default="")
-			require_encryption = get_env("BACKUP_REQUIRE_ENCRYPTION", default="false").lower() == "true"
+			require_encryption = get_env_str("BACKUP_REQUIRE_ENCRYPTION", default="false").lower() == "true"
 			if encryption_key:
 				encrypted_name = f"{backup_zip_name}.enc"
 				encrypted_path = f"{backup_zip_path}.enc"
@@ -176,7 +186,7 @@ def main():
 			"use_ssl": use_ssl,
 			"use_tls": use_tls,
 		}
-			send_email(final_path, final_name, subject, body, smtp_settings)
+		send_email(final_path, final_name, subject, body, smtp_settings)
 		print("Backup enviado com sucesso.")
 		return 0
 	except Exception as exc:
