@@ -26,7 +26,15 @@ def get_env_str(name, default="", required=False):
 	return str(value)
 
 
+def get_env_bool(name, default=False):
+	raw = get_env(name, default=str(default).lower())
+	if raw is None:
+		return bool(default)
+	return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def resolve_db_path():
+	# Aceita estrutura do app BF1 tanto em `db/db_config.py` quanto em `db_config.py`.
 	try:
 		from importlib import import_module
 		db_config = import_module("db.db_config")
@@ -34,7 +42,23 @@ def resolve_db_path():
 		if config_db_path:
 			return str(config_db_path)
 	except Exception:
-		return get_env("DB_PATH", default=get_env("DATABASE_PATH"), required=True)
+		pass
+
+	try:
+		from importlib import import_module
+		db_config = import_module("db_config")
+		config_db_path = getattr(db_config, "DB_PATH", None)
+		if config_db_path:
+			return str(config_db_path)
+	except Exception:
+		pass
+
+	configured_path = get_env("DB_PATH", default=get_env("DATABASE_PATH"))
+	if configured_path:
+		return str(configured_path)
+
+	# Fallback local padrão para facilitar execução em jobs simples.
+	return str(Path("bolao_f1.db").resolve())
 
 
 def build_backup(db_path, tz_name, temp_dir):
@@ -101,19 +125,20 @@ def enforce_size_limit(file_path, max_mb):
 		)
 
 
-def send_email(zip_path, zip_name, subject, body, smtp_settings):
+def send_email(file_path, file_name, subject, body, smtp_settings):
 	msg = EmailMessage()
 	msg["Subject"] = subject
 	msg["From"] = smtp_settings["from_addr"]
 	msg["To"] = smtp_settings["to_addr"]
 	msg.set_content(body)
 
-	with open(zip_path, "rb") as f:
+	with open(file_path, "rb") as f:
+		subtype = "zip" if file_name.lower().endswith(".zip") else "octet-stream"
 		msg.add_attachment(
 			f.read(),
 			maintype="application",
-			subtype="zip",
-			filename=zip_name,
+			subtype=subtype,
+			filename=file_name,
 		)
 
 	if smtp_settings["use_ssl"]:
@@ -142,19 +167,34 @@ def main():
 
 		from_addr = get_env("SMTP_FROM", default=smtp_user)
 		alert_email = get_env("EMAIL_ADMIN", default=get_env("ALERT_EMAIL", default=""))
-		to_addr = get_env("SMTP_TO", default=alert_email or from_addr)
+		to_addr = get_env("BACKUP_TO_EMAIL", default=get_env("SMTP_TO", default=alert_email or from_addr))
 		if not to_addr:
-			raise ValueError("Missing recipient email. Set SMTP_TO or EMAIL_ADMIN.")
+			raise ValueError("Missing recipient email. Set BACKUP_TO_EMAIL, SMTP_TO or EMAIL_ADMIN.")
 
-		use_ssl = get_env_str("SMTP_USE_SSL", default="true").lower() == "true"
-		use_tls = get_env_str("SMTP_USE_TLS", default="false").lower() == "true"
+		require_auth = get_env_bool("SMTP_REQUIRE_AUTH", default=True)
+		if require_auth and (not smtp_user or not smtp_password):
+			raise ValueError("SMTP credentials missing. Set EMAIL_REMETENTE/SMTP_USER and SENHA_EMAIL/SMTP_PASSWORD.")
+
+		use_ssl = get_env_bool("SMTP_USE_SSL", default=True)
+		use_tls = get_env_bool("SMTP_USE_TLS", default=False)
 		if use_ssl and use_tls:
 			raise ValueError("SMTP_USE_SSL and SMTP_USE_TLS cannot both be true.")
 
 		tz = ZoneInfo(tz_name)
 		date_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-		subject = get_env("BACKUP_SUBJECT", default=f"Backup diario - {date_str}")
+		subject = get_env("BACKUP_SUBJECT", default=f"Backup horario - {date_str}")
 		body = get_env("BACKUP_BODY", default=f"Backup gerado em {date_str}.")
+
+		smtp_settings = {
+			"host": smtp_host,
+			"port": smtp_port,
+			"user": smtp_user,
+			"password": smtp_password,
+			"from_addr": from_addr,
+			"to_addr": to_addr,
+			"use_ssl": use_ssl,
+			"use_tls": use_tls,
+		}
 
 		with tempfile.TemporaryDirectory() as temp_dir:
 			backup_zip_path, backup_zip_name = build_backup(db_path, tz_name, temp_dir)
@@ -176,17 +216,7 @@ def main():
 
 			max_mb = float(get_env("MAX_ATTACHMENT_MB", default="24"))
 			enforce_size_limit(final_path, max_mb)
-		smtp_settings = {
-			"host": smtp_host,
-			"port": smtp_port,
-			"user": smtp_user,
-			"password": smtp_password,
-			"from_addr": from_addr,
-			"to_addr": to_addr,
-			"use_ssl": use_ssl,
-			"use_tls": use_tls,
-		}
-		send_email(final_path, final_name, subject, body, smtp_settings)
+			send_email(final_path, final_name, subject, body, smtp_settings)
 		print("Backup enviado com sucesso.")
 		return 0
 	except Exception as exc:
