@@ -10,6 +10,10 @@ from email.message import EmailMessage
 from pathlib import Path
 import shutil
 import subprocess
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 def get_env(name, default=None, required=False):
@@ -31,6 +35,90 @@ def get_env_bool(name, default=False):
 	if raw is None:
 		return bool(default)
 	return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _append_query_token(url, token):
+	if not token:
+		return url
+	parsed = urllib.parse.urlsplit(url)
+	query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+	if "token" not in query:
+		query["token"] = token
+	new_query = urllib.parse.urlencode(query)
+	return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
+
+
+def _perform_trigger_request(url, method, token, timeout_seconds, include_query_token):
+	request_url = _append_query_token(url, token) if include_query_token else url
+	payload = {
+		"source": "do-app-platform-cron",
+		"triggered_at": datetime.utcnow().isoformat() + "Z",
+	}
+	request_data = None
+	if method == "POST":
+		request_data = json.dumps(payload).encode("utf-8")
+
+	request = urllib.request.Request(
+		request_url,
+		data=request_data,
+		method=method,
+	)
+	if method == "POST":
+		request.add_header("Content-Type", "application/json")
+
+	header_name = get_env_str("BACKUP_TRIGGER_TOKEN_HEADER", default="Authorization")
+	if token:
+		header_value = token
+		if header_name.lower() == "authorization" and not token.lower().startswith("bearer "):
+			header_value = f"Bearer {token}"
+		request.add_header(header_name, header_value)
+
+	with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+		response_body = response.read().decode("utf-8", errors="replace")
+		if response.status < 200 or response.status >= 300:
+			raise RuntimeError(f"HTTP {response.status}: {response_body[:400]}")
+		print(f"Trigger remoto executado com sucesso via {method} (HTTP {response.status}).")
+		if response_body.strip():
+			print(f"Resposta: {response_body[:400]}")
+
+
+def trigger_remote_backup(url, token="", timeout_seconds=30.0):
+	http_mode = get_env_str("BACKUP_TRIGGER_HTTP_MODE", default="auto").strip().lower()
+	if http_mode not in {"auto", "post", "get"}:
+		raise ValueError("BACKUP_TRIGGER_HTTP_MODE invalido. Use auto, post ou get.")
+
+	include_query_token = get_env_bool("BACKUP_TRIGGER_INCLUDE_QUERY_TOKEN", default=False)
+
+	try:
+		if http_mode == "get":
+			_perform_trigger_request(url, "GET", token, timeout_seconds, include_query_token)
+			return
+
+		if http_mode == "post":
+			_perform_trigger_request(url, "POST", token, timeout_seconds, include_query_token)
+			return
+
+		# auto: tenta POST e faz fallback para GET quando endpoint Streamlit rejeita verbo.
+		try:
+			_perform_trigger_request(url, "POST", token, timeout_seconds, include_query_token)
+			return
+		except urllib.error.HTTPError as post_err:
+			if post_err.code not in {404, 405}:
+				raise
+			print(
+				f"Aviso: trigger POST retornou HTTP {post_err.code}. Tentando GET como fallback.",
+				file=sys.stderr,
+			)
+			_perform_trigger_request(url, "GET", token, timeout_seconds, include_query_token)
+	except urllib.error.HTTPError as err:
+		body = ""
+		try:
+			body = err.read().decode("utf-8", errors="replace")
+		except Exception:
+			pass
+		raise RuntimeError(f"Falha ao chamar endpoint remoto: HTTP {err.code}. {body[:400]}") from err
+	except urllib.error.URLError as err:
+		raise RuntimeError(f"Falha de rede ao chamar endpoint remoto: {err.reason}") from err
 
 
 def resolve_db_path():
@@ -156,6 +244,17 @@ def send_email(file_path, file_name, subject, body, smtp_settings):
 
 def main():
 	try:
+		trigger_url = get_env_str("BACKUP_TRIGGER_URL", default="").strip()
+		if trigger_url:
+			trigger_token = get_env_str("BACKUP_TRIGGER_TOKEN", default="")
+			timeout_seconds = float(get_env("BACKUP_TRIGGER_TIMEOUT_SECONDS", default="30"))
+			trigger_remote_backup(
+				url=trigger_url,
+				token=trigger_token,
+				timeout_seconds=timeout_seconds,
+			)
+			return 0
+
 		db_path = resolve_db_path()
 		tz_name = get_env_str("TIMEZONE", default="America/Sao_Paulo")
 

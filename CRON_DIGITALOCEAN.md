@@ -40,8 +40,28 @@ Use a expressão CRON:
 - `BACKUP_ENCRYPTION_KEY`: chave para criptografar o `.zip` com OpenSSL (gera `.enc`).
 - `BACKUP_REQUIRE_ENCRYPTION=true`: falha o job se a chave não estiver configurada.
 
+## Opcao 2: Trigger remoto (recomendado para App Platform)
+
+Quando o job nao compartilha o mesmo filesystem do servico web, configure o job para apenas chamar um endpoint interno da aplicacao.
+
+Variaveis do job:
+
+- `BACKUP_TRIGGER_URL`: URL HTTPS do endpoint de backup da aplicacao.
+	- Para endpoint HTTP tradicional: `https://seu-app.ondigitalocean.app/internal/backup/run`
+	- Para fallback interno Streamlit: `https://seu-app.ondigitalocean.app/?internal_route=%2Finternal%2Fbackup%2Frun`
+- `BACKUP_TRIGGER_TOKEN`: token secreto para autenticar a chamada.
+- `BACKUP_TRIGGER_TOKEN_HEADER` (opcional): header do token. Padrao `Authorization`.
+- `BACKUP_TRIGGER_TIMEOUT_SECONDS` (opcional): timeout da chamada HTTP. Padrao `30`.
+- `BACKUP_TRIGGER_HTTP_MODE` (opcional): `auto` (padrao), `post` ou `get`.
+- `BACKUP_TRIGGER_INCLUDE_QUERY_TOKEN` (opcional): envia `token` na query string. Padrao `false`.
+
+Com `BACKUP_TRIGGER_URL` definido, o `bkp.py` entra em modo trigger remoto e nao tenta abrir SQLite local.
+
+Para Streamlit com rota interna por query, use `BACKUP_TRIGGER_HTTP_MODE=get` para compatibilidade maxima.
+
 ## Comportamento do script
 
+- Se `BACKUP_TRIGGER_URL` estiver definido: chama endpoint remoto e encerra.
 - Faz checkpoint WAL e backup consistente do SQLite.
 - Compacta em `.zip`.
 - Opcionalmente criptografa com OpenSSL (`aes-256-cbc`, `pbkdf2`).
