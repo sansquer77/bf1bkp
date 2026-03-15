@@ -3,7 +3,7 @@ import sys
 import sqlite3
 import tempfile
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import smtplib
 from email.message import EmailMessage
@@ -48,11 +48,28 @@ def _append_query_token(url, token):
 	return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
 
 
+def _validate_trigger_url(url):
+	parsed = urllib.parse.urlsplit(url)
+	if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+		raise ValueError(
+			"BACKUP_TRIGGER_URL invalida. Use URL absoluta com http/https, "
+			"ex.: https://seu-app.ondigitalocean.app/?internal_route=%2Finternal%2Fbackup%2Frun"
+		)
+
+	placeholder_markers = ["SEU_APP", "YOUR_APP", "example", "localhost"]
+	host_lower = parsed.netloc.lower()
+	if any(marker.lower() in host_lower for marker in placeholder_markers):
+		raise ValueError(
+			f"BACKUP_TRIGGER_URL parece placeholder ou host invalido: {parsed.netloc}. "
+			"Configure com o dominio real publicado na App Platform."
+		)
+
+
 def _perform_trigger_request(url, method, token, timeout_seconds, include_query_token):
 	request_url = _append_query_token(url, token) if include_query_token else url
 	payload = {
 		"source": "do-app-platform-cron",
-		"triggered_at": datetime.utcnow().isoformat() + "Z",
+		"triggered_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
 	}
 	request_data = None
 	if method == "POST":
@@ -83,6 +100,7 @@ def _perform_trigger_request(url, method, token, timeout_seconds, include_query_
 
 
 def trigger_remote_backup(url, token="", timeout_seconds=30.0):
+	_validate_trigger_url(url)
 	http_mode = get_env_str("BACKUP_TRIGGER_HTTP_MODE", default="auto").strip().lower()
 	if http_mode not in {"auto", "post", "get"}:
 		raise ValueError("BACKUP_TRIGGER_HTTP_MODE invalido. Use auto, post ou get.")
@@ -118,7 +136,10 @@ def trigger_remote_backup(url, token="", timeout_seconds=30.0):
 			pass
 		raise RuntimeError(f"Falha ao chamar endpoint remoto: HTTP {err.code}. {body[:400]}") from err
 	except urllib.error.URLError as err:
-		raise RuntimeError(f"Falha de rede ao chamar endpoint remoto: {err.reason}") from err
+		raise RuntimeError(
+			f"Falha de rede ao chamar endpoint remoto ({url}): {err.reason}. "
+			"Verifique dominio DNS e se o app esta publicado/ativo."
+		) from err
 
 
 def resolve_db_path():
